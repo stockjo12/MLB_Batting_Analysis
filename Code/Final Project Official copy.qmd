@@ -1,0 +1,722 @@
+---
+title: "Final Project"
+author: "Isaac Miller, Cooper Riggs, & Stockton Nelson"
+format: html
+editor: visual
+---
+
+## 1. Load Libraries and Import Data
+
+```{r}
+#Downloading Libraries
+library(bestglm)       #Finds the Best Model using In Model Metrics
+library(car)           #Helps us to measure VIF
+library(corrplot)      #Makes the correlation matrix 
+library(dplyr)         #Brings in essential functions
+library(GGally)        #Makes the scatterplot matrix
+library(ggfortify)     #Runs the Residuals vs Fitted Plot, Q-Q Plot, Residuals vs Leverage Plot
+library(glmnet)        #Runs LASSO and Ridge Regression
+library(janitor)       #Cleaning up and organizing data
+library(patchwork)     #Puts together multiple plots into one output
+library(table1)        #Gives summary statistics of datasets
+library(tidyverse)     #Brings in all core packages
+library(xtable)        #Converts R code into LaTex code to make tables in LaTex
+library(Metrics)       #Calculates predictive metrics like RMSE
+```
+
+```{r}
+#Setting Seed
+set.seed(12)
+```
+
+```{r}
+#Bringing in data
+baseball <- read.csv("MLB_Player_Batting_2024.csv", header = T)
+baseball <- baseball[-1, ]
+```
+
+| Variable | Description                             |
+|----------|-----------------------------------------|
+| Player   | Name of the Player                      |
+| Age      | Age in Years                            |
+| Team     | Team Abbreviation                       |
+| Lg       | League Abbreviation                     |
+| Division | Division of Team                        |
+| WAR      | Wins Above Replacement                  |
+| G        | Games Played                            |
+| PA       | Plate Appearances                       |
+| AB       | At Bats                                 |
+| R        | Runs Scored                             |
+| H        | Hits                                    |
+| 2B       | Doubles                                 |
+| 3B       | Triples                                 |
+| **HR**   | **Home Runs**                           |
+| RBI      | Runs Batted In                          |
+| SB       | Stolen Bases                            |
+| CS       | Caught Stealing                         |
+| BB       | Bases on Balls                          |
+| SO       | Strikeouts                              |
+| **BA**   | **Batting Average**                     |
+| OBP      | On Base Percentage                      |
+| SLG      | Bases Reached per at Bat                |
+| OPS      | On Base % and Bases Reached per at Bat  |
+| OPS+     | OPS x 100 Adjusted to Environment       |
+| rOBA     | Offensive Contributions                 |
+| Rbat+    | Hitting Ability Adjusted to Environment |
+| TB       | Total Bases Earned                      |
+| HBP      | Hit by Pitch                            |
+| SH       | Sacrifice Hits                          |
+| SF       | Sacrifice Flies                         |
+| IBB      | Intentional Walks                       |
+
+## 2. Data Cleaning and Preparation
+
+```{r}
+# Creating a correlation plot with all of our variables in the originial dataset
+baseball_orig <- baseball |>
+  select(where(is.numeric))
+
+corrplot(cor(baseball_orig))
+```
+
+```{r}
+#Changing Categorical Variables to Factors
+baseball <- baseball |>
+  mutate(Team = as.factor(Team)) |>
+  mutate(Lg = as.factor(Lg)) |>
+  mutate(Sac = SF + SH) |>
+  select(-G, -AB, -OPS, -OPS., -rOBA, -TB, -H, -R, -Rbat., -SF, -SH)
+
+#Cleaning up Variable Names and Columns
+baseball <- baseball |>
+  select(-Rk) |>
+  filter(PA > 162) |>
+  mutate(Division = case_when(
+    Team %in% c("NYY", "BOS", "TOR", "BAL", "TBR") ~ "AL East",
+    Team %in% c("CHW", "CLE", "DET", "KCR", "MIN") ~ "AL Central",
+    Team %in% c("HOU", "LAA", "OAK", "SEA", "TEX") ~ "AL West",
+    Team %in% c("ATL", "MIA", "NYM", "PHI", "WSN") ~ "NL East",
+    Team %in% c("CHC", "CIN", "MIL", "PIT", "STL") ~ "NL Central",
+    Team %in% c("LAD", "SFG", "SDP", "COL", "ARI") ~ "NL West",)) |>
+  filter(!is.na(Division)) |>
+  mutate(Division = as.factor(Division)) |>
+  mutate(
+      division_AL_East = ifelse(Division == "AL East", 1, 0),
+      division_AL_West = ifelse(Division == "AL West", 1, 0),
+      division_AL_Central = ifelse(Division == "AL Central", 1, 0),
+      division_NL_Central = ifelse(Division == "NL Central", 1, 0),
+      division_NL_East = ifelse(Division == "NL East", 1, 0)
+    ) |>
+  clean_names() |>
+  rename(league = lg, doubles = x2b, triples = x3b, steals = sb)
+```
+
+```{r}
+#Changing the Baseline of our Indicator Variable
+baseball$division <- relevel(baseball$division, ref = "NL West")
+
+#Making Dataset with only Numeric Variables
+baseball_numeric <- baseball |>
+  select(where(is.numeric))
+```
+
+## 3. Exploratory Data Analysis (EDA)
+
+```{r}
+#Making Scatterplot of Batting Average and Homeruns
+ggplot(data = baseball_numeric, mapping = aes(x = ba, y = hr)) + 
+  geom_point(color = "#002D72") + 
+  labs(x = "Batting Average",
+       y = "Home Runs",
+       title = "Batting Average vs. Home Runs") + 
+  theme_minimal()
+```
+
+```{r}
+#Looking at a Summary of the Data
+base <- baseball_numeric |>
+  select(-division_al_east, -division_al_west, -division_al_central, 
+         -division_nl_central, -division_nl_east)
+vars <- names(base)
+form <- as.formula(paste("~", paste(vars, collapse = " + ")))
+table1(form, data = baseball_numeric)
+```
+
+```{r}
+#Making a correlation plot
+newcorrplot <- corrplot(cor(base))
+```
+
+## 4. Define Regression Models
+
+### Batting Average
+
+```{r}
+#Batting average - pick out a model and use it, then run AIC and BIC
+ba_mod <- lm(ba ~ bb + rbi + obp, data = baseball_numeric)
+summary(ba_mod)
+
+#Our test model for batting average
+```
+
+```{r}
+#Reordering our dataset
+batting_average <- baseball_numeric |>
+  select(-ba, everything(), ba)
+
+# multiplying slg and obp by 100, because they are both % and HR is not, this will help with interpretability
+batting_average$slg <- batting_average$slg * 100
+batting_average$obp <- batting_average$obp * 100
+```
+
+```{r}
+#BIC on batting average dataset
+best_subsets_bic_ba <- bestglm(batting_average,
+                            IC = "BIC",
+                            method = "exhaustive")
+summary(best_subsets_bic_ba$BestModel)
+# war, pa, bb, so, obp, slg, hbp were chosen by BIC
+```
+
+```{r}
+#AIC for batting average dataset
+best_subsets_aic_ba <- bestglm(batting_average,
+                            IC = "AIC",
+                            method = "exhaustive")
+
+summary(best_subsets_aic_ba$BestModel)
+#war, pa, doubles, hr, bb, so, obp, slg, gidp, hbp, ibb, division_nl_east were chosen by AIC 
+```
+
+```{r}
+#Selecting Predictors and Response Variables
+ba_x <- as.matrix(batting_average[, 1:22])
+ba_y <- batting_average[, 23]
+
+#Running LASSO Cross Validation
+cv_lasso_ba <- cv.glmnet(x = ba_x,
+                          y = ba_y, 
+                          type.measure = "mse", 
+                          alpha = 1)
+
+#Finding Model
+coef(cv_lasso_ba, s = "lambda.1se")
+
+#LASSO: war, pa, doubles, bb, so, obp, slg, gidp, hbp, sac, division_al_west, division_nl_east were chosen by LASSO
+```
+
+### Home Runs
+
+```{r}
+#Home runs - do the same for home runs
+hr_mod <- lm(hr ~ ba + slg + rbi + so + bb, data = baseball_numeric)
+summary(hr_mod)
+
+#Our test model for hr predictors
+hr_data <- baseball_numeric |>
+  select(-hr, everything(), hr) |>
+  select(-ba, -pa)
+#modified dataset to move hr to the end
+
+# multiplying slg and obp by 100, because they are both % and HR is not, this will help with interpretability
+hr_data$slg <- hr_data$slg * 100
+hr_data$obp <- hr_data$obp * 100
+```
+
+```{r}
+#BIC model for hr
+best_subsets_bic_hr <- bestglm(hr_data,
+                            IC = "BIC",
+                            method = "exhaustive")
+summary(best_subsets_bic_hr$BestModel)
+#BIC: war, doubles, triples, rbi, bb, so, obp, slg, hbp, ibb, sac were chosen by BIC
+```
+
+```{r}
+#AIC for hr data
+best_subsets_aic_hr <- bestglm(hr_data,
+                            IC = "AIC",
+                            method = "exhaustive")
+
+summary(best_subsets_aic_hr$BestModel)
+
+#AIC: war, doubles, triples, rbi, bb, so, obp, slg, hbp, ibb, sac, division_nl_central
+```
+
+```{r}
+#Selecting Predictors and Response Variables
+hr_x <- as.matrix(hr_data[, 1:20])
+hr_y <- hr_data[, 21]
+
+#Running LASSO Cross Validation
+cv_lasso_hr <- cv.glmnet(x = hr_x,
+                          y = hr_y, 
+                          type.measure = "mse", 
+                          alpha = 1)
+
+#Finding Model
+coef(cv_lasso_hr, s = "lambda.1se")
+
+#LASSO: age, war, doubles, triples, rbi, bb, so, obp, slg, hbp, ibb, sac, division_al_west, division_nl_central
+```
+
+## 5. Cross Validation
+
+### Batting Average
+
+```{r}
+#Selecting all of our models
+ba_mod <- lm(ba ~ bb + rbi + obp, data = baseball_numeric)
+ba_bic <- best_subsets_bic_ba$BestModel
+ba_aic <- best_subsets_aic_ba$BestModel
+ba_lasso <- lm(ba ~ war + pa + doubles + bb + so + obp + slg + gidp + hbp + sac 
+               + division_al_west + division_nl_east, data = batting_average)
+```
+
+```{r}
+#Selecting our training splits
+B <- 100
+
+#Creating MSE and Bias Vectors
+mod_mse <- rep(NA, B)
+mod_bias <- rep(NA, B)
+
+mod_bic_mse <- rep(NA, B)
+mod_bic_bias <- rep(NA, B)
+
+mod_aic_mse <- rep(NA, B)
+mod_aic_bias <- rep(NA, B)
+
+mod_lasso_mse <- rep(NA, B)
+mod_lasso_bias <- rep(NA, B)
+
+#Obtaining sample size
+n <- nrow(batting_average)
+# war, pa, bb, so, obp, slg, hbp were chosen by BIC
+```
+
+```{r}
+#Cross Validation Function
+for (b in 1:B) {
+#Define the test/training split
+  test_indx <- sample(1:n, floor(.2*n)) 
+  test_data <- batting_average[test_indx,]
+  train_data <- batting_average[-test_indx,]
+
+#Fit each model using the training data
+  train_mod_p <- lm(ba ~ bb + rbi + obp, data = baseball_numeric)
+  train_mod_b <- lm(ba ~ war + pa + bb + so + obp + slg + hbp, data = batting_average)
+  train_mod_a <- lm(ba ~ war + pa + doubles + hr + bb + so + obp + slg + gidp 
+                    + hbp + ibb + division_nl_east, data = batting_average)
+  train_mod_l <- lm(ba ~ war + pa + doubles + bb + so + obp + slg + gidp + hbp + sac 
+                    + division_al_west + division_nl_east, data = batting_average)
+
+#Get predictions for the test data
+  pred_mod_p <- predict(train_mod_p, newdata = test_data)
+  pred_mod_b <- predict(train_mod_b, newdata = test_data)
+  pred_mod_a <- predict(train_mod_a, newdata = test_data)
+  pred_mod_l <- predict(train_mod_l, newdata = test_data)
+  
+#Evaluate the bias and MSE of your predictions
+  mod_mse[b] = mean((pred_mod_p - test_data$ba)^2)
+  mod_bias[b] = mean(pred_mod_p - test_data$ba)
+  
+  mod_bic_mse[b] = mean((pred_mod_b - test_data$ba)^2)
+  mod_bic_bias[b] = mean(pred_mod_b - test_data$ba)
+  
+  mod_aic_mse[b] = mean((pred_mod_a - test_data$ba)^2)
+  mod_aic_bias[b] = mean(pred_mod_a - test_data$ba)
+  
+  mod_lasso_mse[b] = mean((pred_mod_l - test_data$ba)^2)
+  mod_lasso_bias[b] = mean(pred_mod_l - test_data$ba)
+}
+```
+
+```{r}
+#Putting together results
+results_ba <- matrix(c(mean(mod_mse), mean(mod_aic_mse), mean(mod_bic_mse), mean(mod_lasso_mse),
+                   mean(mod_bias), mean(mod_aic_bias), mean(mod_bic_bias), mean(mod_lasso_bias)),
+                  nrow = 4, ncol = 2)
+rownames(results_ba) <- c('Personal', 'AIC', 'BIC', 'LASSO')
+colnames(results_ba) <- c('PMSE', 'Bias')
+results_ba
+#Since both LASSO and AIC have the same amount of predictors, and LASSO has lower bias, we will go with the LASSO model
+```
+
+### Home Runs
+
+```{r}
+#Selecting all of our models
+hr_mod <- lm(hr ~ slg + rbi + so + bb, data = baseball_numeric)
+hr_bic <- best_subsets_bic_hr$BestModel
+hr_aic <- best_subsets_aic_hr$BestModel
+hr_lasso <- lm(hr ~ age + war + doubles + triples + rbi + bb + so + obp + slg + 
+                 hbp + ibb + sac + division_al_west + division_nl_central, data = hr_data)
+```
+
+```{r}
+#Creating MSE and Bias Vectors
+mod_mse_h <- rep(NA, B)
+mod_bias_h <- rep(NA, B)
+
+mod_b_mse <- rep(NA, B)
+mod_b_bias <- rep(NA, B)
+
+mod_a_mse <- rep(NA, B)
+mod_a_bias <- rep(NA, B)
+
+mod_l_mse <- rep(NA, B)
+mod_l_bias <- rep(NA, B)
+
+#Obtaining sample size
+n <- nrow(hr_data)
+```
+
+```{r}
+#Cross Validation Function
+for (b in 1:B) {
+#Define the test/training split
+  test_indx <- sample(1:n, floor(.2*n)) 
+  test_data <- hr_data[test_indx,]
+  train_data <- hr_data[-test_indx,]
+
+#Fit each model using the training data
+  train_mod_h <- lm(hr ~ slg + rbi + so + bb, data = baseball_numeric)
+  train_mod_b <- lm(hr ~ war + doubles + triples + rbi + bb + so + obp + slg + 
+                      hbp + ibb + sac, data = hr_data)
+  train_mod_a <- lm(hr ~ war + doubles + triples + rbi + bb + so + obp + slg + 
+                      hbp + ibb + sac + division_nl_central, data = hr_data)
+  train_mod_l <- lm(hr ~ age + war + doubles + triples + rbi + bb + so + obp + slg 
+                    + ibb + sac + division_al_west + division_nl_central, data = hr_data)
+
+#Get predictions for the test data
+  pred_mod_h <- predict(train_mod_h, newdata = test_data)
+  pred_mod_b <- predict(train_mod_b, newdata = test_data)
+  pred_mod_a <- predict(train_mod_a, newdata = test_data)
+  pred_mod_l <- predict(train_mod_l, newdata = test_data)
+  
+#Evaluate the bias and MSE of your predictions
+  mod_mse_h[b] = mean((pred_mod_h - test_data$hr)^2)
+  mod_bias_h[b] = mean(pred_mod_h - test_data$hr)
+  
+  mod_b_mse[b] = mean((pred_mod_b - test_data$hr)^2)
+  mod_b_bias[b] = mean(pred_mod_b - test_data$hr)
+  
+  mod_a_mse[b] = mean((pred_mod_a - test_data$hr)^2)
+  mod_a_bias[b] = mean(pred_mod_a - test_data$hr)
+  
+  mod_l_mse[b] = mean((pred_mod_l - test_data$hr)^2)
+  mod_l_bias[b] = mean(pred_mod_l - test_data$hr)
+}
+```
+
+```{r}
+#Putting together results
+results_hr <- matrix(c(mean(mod_mse_h), mean(mod_a_mse), mean(mod_b_mse), mean(mod_l_mse),
+                   mean(mod_bias_h), mean(mod_a_bias), mean(mod_b_bias), mean(mod_l_bias)),
+                  nrow = 4, ncol = 2)
+rownames(results_hr) <- c('Personal', 'AIC', 'BIC', 'LASSO')
+colnames(results_hr) <- c('PMSE', 'Bias')
+results_hr
+#Seeing the AIC has the best PMSE and Bias, we will go with the AIC model
+```
+
+## 6. Check Assumptions
+
+### Batting Average
+
+```{r}
+#Model of Choice
+ba_lm <- lm(ba ~ war + doubles + bb + so + obp + slg + gidp + hbp + sac 
+            + division_al_west + division_nl_east, data = batting_average)
+```
+
+#### Linearity
+
+```{r}
+#Partial Regression Plots
+#Click "Return" in Console to Run
+avPlots(ba_lm)
+```
+
+#### Independence
+
+Our dataset has a row for each player's batting performance for the season and columns of different metrics that measure how well the player is at batting. Since we have no reason to assume that the data is dependent on each other, we can assume that the data is independent.
+
+#### Normality
+
+```{r}
+#QQ Plot
+autoplot(ba_lm, which = 2)  +
+coord_equal()
+```
+
+#### Equal Variance
+
+```{r}
+#Saving residuals and fitted values to a new data frame
+ba_expanded <- data.frame(
+  batting_average, 
+  fitted.values = ba_lm$fitted.values,
+  residuals = ba_lm$residuals
+)
+
+#Residual vs. Predictor Plots
+resid_vs_war <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = war, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_doubles <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = doubles, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_bb <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = bb, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_so <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = so, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_obp <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = obp, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_slg <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = slg, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_gidp <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = gidp, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_hbp <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = hbp, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_sac <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = sac, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_division_al_west <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = division_al_west, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+resid_vs_division_nl_east <- ggplot(data = ba_expanded) +
+  geom_point(mapping = aes(x = division_nl_east, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+
+#Final plots
+(resid_vs_war | resid_vs_doubles) /
+  (resid_vs_bb | resid_vs_so)
+
+(resid_vs_obp | resid_vs_slg) /
+    (resid_vs_gidp | resid_vs_hbp) 
+
+(resid_vs_sac | resid_vs_division_al_west | resid_vs_division_nl_east)
+```
+
+#### Influential Points
+
+```{r}
+#Cook's Distance Plot
+autoplot(ba_lm, which = 4)
+```
+
+#### Multicollinearity
+
+```{r}
+#Variance Inflation Factors
+vif(ba_lm)
+mean(vif(ba_lm))
+```
+
+### Home Runs
+
+```{r}
+# Creating the lm model for hr dataset
+hr_lm <- lm(hr ~ war + doubles + triples + rbi + bb + so + obp + slg + hbp + ibb + sac + division_nl_central, data = hr_data)
+```
+
+#### Linearity
+
+```{r}
+#Partial Regression Plots
+#Click "Return" in Console to Run
+avPlots(hr_lm)
+```
+
+#### Independence
+
+Our dataset has a row for each player's batting performance for the season and columns of different metrics that measure how well the player is at batting. Since we have no reason to assume that the data is dependent on each other, we can assume that the data is independent.
+
+#### Normality
+
+```{r}
+#QQ Plot
+autoplot(hr_lm, which = 2)  +
+coord_equal()
+```
+
+#### Equal Variance
+
+```{r}
+#Saving residuals and fitted values to a new data frame
+hr_expanded <- data.frame(
+  hr_data, 
+  fitted.values = hr_lm$fitted.values,
+  residuals = hr_lm$residuals
+)
+
+#Residual vs. Predictor Plots
+hresid_vs_war <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = war, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_doubles <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = doubles, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_triples <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = triples, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_rbi <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = rbi, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_bb <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = bb, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_so <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = so, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_obp <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = obp, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_slg <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = slg, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_hbp <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = hbp, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_ibb <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = ibb, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_sac <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = sac, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+hresid_vs_division_nl_central <- ggplot(data = hr_expanded) +
+  geom_point(mapping = aes(x = division_nl_central, y = residuals)) +
+  theme(aspect.ratio = 1)
+
+#Final plots
+(hresid_vs_war | hresid_vs_doubles) /
+  (hresid_vs_triples | hresid_vs_rbi)
+
+(hresid_vs_bb | hresid_vs_so) / 
+  (hresid_vs_obp | hresid_vs_slg)
+
+(hresid_vs_hbp | hresid_vs_ibb) / 
+  (hresid_vs_sac | hresid_vs_division_nl_central)
+```
+
+#### Influential Points
+
+```{r}
+#Cook's Distance Plot
+autoplot(hr_lm, which = 4)
+```
+
+#### Multicollinearity
+
+```{r}
+#Variance Inflation Factors
+vif(hr_lm)
+mean(vif(hr_lm))
+```
+
+## 7. Model Interpretation
+
+### Batting Average
+
+#### Confidence Intervals
+
+```{r}
+# Creating a summary table
+summary_ba_lm <- summary(ba_lm)
+conf_intervals_ba_lm <- confint(ba_lm)
+
+# Create the table
+ba_summary_table <- data.frame(
+  Estimate = summary_ba_lm$coefficients[, "Estimate"],
+  t.value = summary_ba_lm$coefficients[, "t value"],
+  p.value = summary_ba_lm$coefficients[, "Pr(>|t|)"],
+  Lower95 = conf_intervals_ba_lm[, 1],
+  Upper95 = conf_intervals_ba_lm[, 2]
+)
+print(ba_summary_table)
+
+# Converting to LaTex code
+xtable(ba_summary_table, digits = 5)
+```
+
+### Home Runs
+
+#### Confidence Intervals
+
+```{r}
+# Creating a summary table
+summary_hr_lm <- summary(hr_lm)
+conf_intervals_hr_lm <- confint(hr_lm)
+
+# Create the table
+hr_summary_table <- data.frame(
+  Estimate = summary_hr_lm$coefficients[, "Estimate"],
+  t.value = summary_hr_lm$coefficients[, "t value"],
+  p.value = summary_hr_lm$coefficients[, "Pr(>|t|)"],
+  Lower95 = conf_intervals_hr_lm[, 1],
+  Upper95 = conf_intervals_hr_lm[, 2]
+)
+print(hr_summary_table)
+
+# Converting to LaTex code
+xtable(hr_summary_table, digits = 3)
+```
+
+## 8. Analysis of Influential Points
+
+```{r}
+# Creating a new data set and removing Shohei Ohtani and Aaron Judge because they both have influence on the previous model
+hr_data_IP <- hr_data
+hr_data_IP <- hr_data_IP[-2, ]
+hr_data_IP <- hr_data_IP[-7, ]
+
+# Running the new model without Ohtani and Judge
+hr_lm_IP <- lm(hr ~ war + doubles + triples + rbi + bb + so + obp + slg + hbp + ibb + sac + division_nl_central, data = hr_data_IP)
+
+summary(hr_lm_IP)
+```
+
+```{r}
+# Comparison of models with and without Ohtani and Judge
+summary(hr_lm)$adj.r.squared
+summary(hr_lm_IP)$adj.r.squared
+
+AIC(hr_lm, hr_lm_IP)
+BIC(hr_lm, hr_lm_IP)
+```
+
+```{r}
+# Comparison of Root Mean Squared Error for both models
+rmse(hr_data$hr, predict(hr_lm))
+rmse(hr_data_IP$hr, predict(hr_lm_IP))
+```
